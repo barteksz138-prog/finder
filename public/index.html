@@ -35,20 +35,40 @@
 <script type="text/babel">
 const { useState, useEffect, useRef, useCallback } = React;
 
+// Typy wpisów:
+//   isCategory: true  → categoryUrl to pełny URL Kleinanzeigen z filtrem kategorii
+//   (brak)            → query to fraza wyszukiwana w /s-fahrraeder/{query}/k0c217
 const BIKE_MODELS = [
-  { id: "specialized_p3",     label: "Specialized P.3",     query: "Specialized P3 dirt" },
-  { id: "dartmoor_two6player",label: "Dartmoor Two6player", query: "Dartmoor Two6player" },
-  { id: "canyon_stitched_360",label: "Canyon Stitched 360", query: "Canyon Stitched 360" },
-  { id: "trek_ticket",        label: "Trek Ticket",          query: "Trek Ticket dirt" },
-  { id: "rose_the_bruce",     label: "Rose The Bruce",       query: "Rose The Bruce dirt" },
-  { id: "radon_slush",        label: "Radon Slush",          query: "Radon Slush" },
-  // ── Rowery FULL (pełna amortyzacja) ──────────────────────────────────
-  // To nie jest konkretny model — to cała kategoria "Mountainbike" na
-  // Kleinanzeigen (https://www.kleinanzeigen.de/s-fahrraeder/mountainbike/k0c217).
-  // Zamiast wpisywać nazwę roweru, skanujemy całą kategorię MTB, a to
-  // Gemini decyduje (na podstawie tytułu/opisu), czy dany rower to faktycznie
-  // full-suspension, dirt, czy "inny" (i wtedy odrzuca ogłoszenie).
-  { id: "mtb_full_category", label: "🏔️ MTB Full (cała kategoria)", query: "mountainbike", isCategory: true },
+  // ── Konkretne modele dirt (wyszukiwanie po frazie) ───────────────────
+  { id: "specialized_p3",      label: "Specialized P.3",     query: "Specialized P3 dirt" },
+  { id: "dartmoor_two6player", label: "Dartmoor Two6player", query: "Dartmoor Two6player" },
+  { id: "canyon_stitched_360", label: "Canyon Stitched 360", query: "Canyon Stitched 360" },
+  { id: "trek_ticket",         label: "Trek Ticket",          query: "Trek Ticket dirt" },
+  { id: "rose_the_bruce",      label: "Rose The Bruce",       query: "Rose The Bruce dirt" },
+  { id: "radon_slush",         label: "Radon Slush",          query: "Radon Slush" },
+  { id: "canyon_torque",       label: "Canyon Torque",        query: "Canyon Torque" },
+  { id: "canyon_spectral",     label: "Canyon Spectral",      query: "Canyon Spectral" },
+
+  // ── Kategorie Kleinanzeigen (URL z filtrem typu) ─────────────────────
+  // Skanujemy całą kategorię — Gemini decyduje co jest dirt/full, resztę odrzuca.
+  {
+    id: "cat_mountainbike",
+    label: "🏔️ MTB (cała kategoria)",
+    isCategory: true,
+    categoryUrl: "https://www.kleinanzeigen.de/s-fahrraeder/c217+fahrraeder.type_s:mountainbike",
+  },
+  {
+    id: "cat_dirt_bmx",
+    label: "🚵 Dirt / BMX (kategoria)",
+    isCategory: true,
+    categoryUrl: "https://www.kleinanzeigen.de/s-fahrraeder/c217+fahrraeder.type_s:bmx",
+  },
+  {
+    id: "cat_downhill",
+    label: "💥 Downhill (kategoria)",
+    isCategory: true,
+    categoryUrl: "https://www.kleinanzeigen.de/s-fahrraeder/c217+fahrraeder.type_s:downhill",
+  },
 ];
 
 // Etykiety typu roweru zwracanego przez Gemini
@@ -82,7 +102,7 @@ const PROVIDERS = {
 };
 
 const SC = {
-  analyzing: { bg: "#8b5cf622", color: "#a78bfa", border: "#8b5cf655", label: "Gemini analizuje…" },
+  analyzing: { bg: "#8b5cf622", color: "#a78bfa", border: "#8b5cf655", label: "AI analizuje…" },
   deal:      { bg: "#22c55e22", color: "#22c55e", border: "#22c55e55", label: "✅ Okazja!" },
   skip:      { bg: "#1e293b",   color: "#475569", border: "#1e293b",   label: "⏭ Pominięte" },
   sent:      { bg: "#3b82f622", color: "#60a5fa", border: "#3b82f655", label: "📨 Wysłano" },
@@ -106,18 +126,30 @@ function App() {
     try { return JSON.parse(localStorage.getItem("ddf_cfg") || "{}"); } catch { return {}; }
   });
   const [geminiKey,      setGeminiKey]      = useState(cfg.geminiKey || "");
-  const [provider,       setProvider]       = useState(cfg.provider || "gemini");
-  const [geminiModel,    setGeminiModel]    = useState(cfg.geminiModel || "gemini-2.0-flash");
+  const [provider,       setProvider]       = useState(cfg.provider || "groq");
+  const [geminiModel,    setGeminiModel]    = useState(cfg.geminiModel || "llama-3.3-70b-versatile");
   const [geminiChatName, setGeminiChatName] = useState(cfg.geminiChatName || "");
   const [minProfit,      setMinProfit]      = useState(cfg.minProfit || 20);
   const [salesHistory,   setSalesHistory]   = useState(cfg.salesHistory || `Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)
 Canyon Stitched 360 Pro 2024 → 4000 zł (~930€)
+Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)
 Rose The Bruce 2 → 3800 zł (~880€)
 Trek Ticket DJ (amortyzator Pike DJ/Bomber DJ) → 6000 zł (~1400€)
-Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)`);
+Canyon Torque AL 5 edycja 2018 → 5000 zł (~1160€)
+Canyon Spectral AL 6 → 6500 zł (~1510€)`);
   const [discordWebhook, setDiscordWebhook] = useState(cfg.discordWebhook || "");
   const [discordThread,  setDiscordThread]  = useState(cfg.discordThread || "");
-  const [selectedBikes,  setSelectedBikes]  = useState(cfg.selectedBikes || BIKE_MODELS.map(b => b.id));
+  const [selectedBikes,  setSelectedBikes]  = useState(() => {
+    const saved = cfg.selectedBikes;
+    if (!saved) return BIKE_MODELS.map(b => b.id);
+    // Migracja: stary id mtb_full_category -> nowy cat_mountainbike
+    const migrated = saved.map(id => id === 'mtb_full_category' ? 'cat_mountainbike' : id);
+    // Dodaj nowe kategorie jeśli ich nie ma
+    ['cat_mountainbike','cat_dirt_bmx','cat_downhill'].forEach(id => {
+      if (!migrated.includes(id)) migrated.push(id);
+    });
+    return migrated.filter(id => BIKE_MODELS.some(b => b.id === id));
+  });
 
   const [logs,     setLogs]     = useState([]);
   const [results,  setResults]  = useState([]);
@@ -208,8 +240,12 @@ Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, most
     return resp.json();
   };
 
-  const scrapeKleinanzeigen = async (query) => {
-    const url = `https://www.kleinanzeigen.de/s-fahrraeder/${encodeURIComponent(query)}/k0c217`;
+  const scrapeKleinanzeigen = async (bike) => {
+    // Kategorie mają gotowy URL z filtrem Kleinanzeigen (np. type_s:mountainbike)
+    // Modele konkretne używają wyszukiwania po frazie
+    const url = bike.isCategory
+      ? bike.categoryUrl
+      : `https://www.kleinanzeigen.de/s-fahrraeder/${encodeURIComponent(bike.query)}/k0c217`;
     const resp = await fetch(`/api/scrape?url=${encodeURIComponent(url)}`);
     if (!resp.ok) throw new Error(`Scrape HTTP ${resp.status}`);
     return resp.text();
@@ -276,39 +312,60 @@ Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, most
   // ── Gemini analysis ────────────────────────────────────────────────────
   const analyzeWithGemini = async (listing) => {
     const chatInfo = geminiChatName
-      ? `\nKontekst: Ta analiza idzie do chatu Gemini o nazwie "${geminiChatName}".`
+      ? `\nKontekst: ${geminiChatName}.`
       : "";
 
-    const prompt = `Jesteś ekspertem od rowerów MTB — zarówno dirtowych (dirt jump / slopestyle, sztywna rama bez tylnego zawieszenia) jak i FULL (pełna amortyzacja — enduro / trail / all-mountain / downhill). Kupujesz rowery w Niemczech i sprzedajesz je w Polsce z zyskiem.
+    const prompt = `Jesteś ekspertem od rowerów dirtowych i MTB full-suspension. Kupujesz rowery w Niemczech i resellujesz je w Polsce z zyskiem. Masz wieloletnie doświadczenie — znasz dokładne ceny rynkowe w Polsce i wiesz które modele sprzedają się szybko.
 
-TWOJE DANE SPRZEDAŻOWE (rowery które już sprzedałeś w Polsce):
-${salesHistory.split("\n").map(l => l.trim()).filter(Boolean).map(l => "- " + l).join("\n")}
+=== TWOJA HISTORIA SPRZEDAŻY W POLSCE (REALNE CENY) ===
+${salesHistory.split("\n").map(l => l.trim()).filter(Boolean).map(l => "• " + l).join("\n")}
 
-KROK 1 — ROZPOZNAJ TYP ROWERU na podstawie tytułu i opisu:
-- "full" — rower z pełną amortyzacją (przód + tył), np. enduro, trail, all-mountain, downhill.
-- "dirt" — rower dirt jump / slopestyle / pumptrack, sztywna rama, brak tylnego zawieszenia.
-- "inny" — wszystko inne: hardtail XC bez tylnego zawieszenia ale NIE dirtowy, szosówka, gravel, miejski, dziecięcy, elektryczny, BMX, części/akcesoria, albo gdy nie da się jednoznacznie rozpoznać typu.
+=== CENNIK REFERENCYJNY — CO WIESZ O TYCH MODELACH ===
+• Canyon Stitched 360 Pro (2021-2024): cena zakupu max 500-600€ żeby zarobić. Wersja z upgradami (Bomber DJ, koła NOA, mostek Title) — warta do 700€ zakupu.
+• Rose The Bruce 2: max zakup 500-550€ żeby wyjść na swoje (sprzedaż ~880€ PL).
+• Trek Ticket DJ z amortyzatorem Pike DJ lub Bomber DJ: można zapłacić do 900€ bo sprzedaż 1400€ PL.
+• Canyon Torque AL 5 (2018): rower enduro full-suspension. Dobra cena zakupu do 700€, sprzedaż ~1160€ PL.
+• Canyon Spectral AL 6: trail/all-mountain full-suspension. Dobra cena zakupu do 1000€, sprzedaż ~1510€ PL.
+• Dartmoor Two6player, Specialized P.3, Radon Slush: popularne dirtowe — wyceniaj analogicznie do Stitched.
 
-KROK 2 — ZASADA OPŁACALNOŚCI:
-- Jeśli "typ_roweru" to "inny" → ZAWSZE "oplaca_sie": false, niezależnie od ceny czy zysku.
-- Jeśli typ to "full" lub "dirt" → opłaca się TYLKO jeśli możesz sprzedać rower w Polsce za minimum ${100 + Number(minProfit)}% ceny zakupu z ogłoszenia (czyli zysk min. ${minProfit}%). Nie uwzględniaj kosztów transportu.
+=== KROK 1 — ROZPOZNAJ TYP ROWERU ===
+Określ typ NA PODSTAWIE TYTUŁU I OPISU ogłoszenia:
+• "dirt" — rower dirt jump / slopestyle / pumptrack / street. Sztywna rama (hardtail), brak tylnego zawieszenia, 26" lub 27.5" koła, geometria do skoków. Przykłady: Canyon Stitched, Trek Ticket DJ, Dartmoor Two6player, Rose The Bruce, Specialized P.3, Radon Slush.
+• "full" — rower z PEŁNĄ amortyzacją (amortyzator z tyłu + widelec z przodu). Typy: enduro, trail, all-mountain, downhill. Przykłady: Canyon Torque, Canyon Spectral, Canyon Strive, Trek Slash, Santa Cruz, Commencal, YT Capra, Specialized Enduro/Stumpjumper FSR.
+• "inny" — WSZYSTKO INNE: hardtail XC/trail bez tylnego zawieszenia ale NIE dirtowy, szosówka, gravel, trekking, miejski, elektryczny, dziecięcy, BMX klasyczny, parts/akcesoria, skuter. Gdy NIE MOŻESZ jednoznacznie rozpoznać — też "inny".
 
-OCEŃ TO OGŁOSZENIE:
+UWAGA: Hardtail MTB (np. XC hardtail, trail hardtail) bez tylnego zawieszenia i bez dirtowej geometrii = "inny". Nie myl z dirt.
+
+=== KROK 2 — OCENA OPŁACALNOŚCI ===
+• Jeśli typ = "inny" → ZAWSZE oplaca_sie: false. Nie analizuj dalej.
+• Jeśli typ = "dirt" lub "full":
+  - Sprawdź cenę ogłoszenia (w EUR).
+  - Na podstawie modelu, roku produkcji, wyposażenia i stanu (opisanego w tytule/opisie) oszacuj realną cenę sprzedaży w Polsce (w PLN i EUR).
+  - Porównaj z Twoją historią sprzedaży — szukaj najbliższego odpowiednika.
+  - Oblicz przewidywany zysk = cena sprzedaży PL (w EUR) minus cena zakupu z ogłoszenia.
+  - oplaca_sie: true TYLKO jeśli zysk wynosi minimum ${minProfit}% ceny zakupu.
+  - BĄDŹ OSTROŻNY: rower używany w złym stanie, po kraksie, z tanim wyposażeniem jest wart mniej. Uwzględniaj rok produkcji.
+  - BĄDŹ RESTRYKCYJNY: lepiej pominąć wątpliwą okazję niż przepłacić. Nie zatwierdzaj ogłoszeń gdzie nie jesteś pewny.
+  - Jeśli cena ogłoszenia nie jest podana (null/brak) → oplaca_sie: false.${chatInfo}
+
+=== OGŁOSZENIE DO OCENY ===
 Tytuł: ${listing.title}
-Cena z ogłoszenia: ${listing.price != null ? listing.price + "€" : "brak"}
+Cena z ogłoszenia: ${listing.price != null ? listing.price + "€" : "BRAK CENY"}
 Lokalizacja: ${listing.location}
 Opis: ${listing.desc}
-Model/kategoria wyszukiwania: ${listing.bike}${chatInfo}
+Model/kategoria wyszukiwania: ${listing.bike}
 
-Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
+Odpowiedz WYŁĄCZNIE w JSON (zero markdown, zero komentarzy, zero tekstu poza JSON):
 {
-  "typ_roweru": "full" lub "dirt" lub "inny",
-  "oplaca_sie": true lub false,
-  "przewidywany_zysk": liczba w EUR (cena sprzedaży w PL minus cena zakupu),
-  "krotki_opis": "max 2 zdania — stan roweru, typ i dlaczego opłaca się lub nie"
+  "typ_roweru": "full" | "dirt" | "inny",
+  "oplaca_sie": true | false,
+  "cena_zakupu_eur": liczba (cena z ogłoszenia) lub null,
+  "szacowana_sprzedaz_eur": liczba (ile dostaniesz w Polsce w EUR) lub null,
+  "przewidywany_zysk": liczba w EUR lub 0,
+  "krotki_opis": "max 2 zdania — model, rok, stan roweru i dlaczego opłaca się lub nie"
 }`;
 
-    addLog(`🤖 Analizuję: ${listing.title}${listing.price != null ? ` za ${listing.price}€` : ""}`, "info");
+        addLog(`🤖 Analizuję: ${listing.title}${listing.price != null ? ` za ${listing.price}€` : ""}`, "info");
 
     // Retry loop — czeka gdy quota wyczerpana
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -411,7 +468,7 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
 
       let listings = [];
       try {
-        const html = await scrapeKleinanzeigen(bike.query);
+        const html = await scrapeKleinanzeigen(bike);
         addLog(`📥 ${bike.label}: pobrano ${html.length} znaków HTML`, "info");
         listings = parseListings(html, bike.label);
         addLog(`📋 ${bike.label}: znaleziono ${listings.length} ogłoszeń`, listings.length > 0 ? "info" : "error");
@@ -481,7 +538,7 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
 
   // ── Continuous loop ────────────────────────────────────────────────────
   const startLoop = async () => {
-    if (!geminiKey)      { addLog("❌ Brak klucza Gemini API", "error"); setTab("settings"); return; }
+    if (!geminiKey)      { addLog("❌ Brak klucza API (Groq/Gemini)", "error"); setTab("settings"); return; }
     if (!discordWebhook) { addLog("❌ Brak Discord Webhook",    "error"); setTab("settings"); return; }
 
     runningRef.current = true;
@@ -900,9 +957,11 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
                   </label>
                   <button onClick={() => setSalesHistory(`Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)
 Canyon Stitched 360 Pro 2024 → 4000 zł (~930€)
+Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)
 Rose The Bruce 2 → 3800 zł (~880€)
 Trek Ticket DJ (amortyzator Pike DJ/Bomber DJ) → 6000 zł (~1400€)
-Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)`)} style={{
+Canyon Torque AL 5 edycja 2018 → 5000 zł (~1160€)
+Canyon Spectral AL 6 → 6500 zł (~1510€)`)} style={{
                     padding: "4px 10px", borderRadius: 6, border: "1px solid #1e293b",
                     background: "transparent", color: "#475569", fontSize: 11,
                   }}>↩ Przywróć domyślne</button>
@@ -937,7 +996,7 @@ Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, most
                 {[
                   { ico: "🔄", t: "Pętla ciągła",  d: "Skanuje bez przerwy — po każdym pełnym cyklu czeka 60s i zaczyna od nowa" },
                   { ico: "🆕", t: "Tylko nowe",     d: "Każde ogłoszenie trafia do Gemini tylko raz — widziane ID są zapamiętane" },
-                  { ico: "🤖", t: "Gemini AI",      d: "Rozpoznaje typ (full/dirt/inny) i ocenia czy warto kupić i odsprzedać w Polsce. Typ \"inny\" jest zawsze odrzucany" },
+                  { ico: "🤖", t: "AI (Groq/Gemini)", d: "Rozpoznaje typ (full/dirt/inny) i ocenia czy warto kupić i odsprzedać w Polsce. Typ \"inny\" jest zawsze odrzucany" },
                   { ico: "📨", t: "Discord",        d: "Webhook z ceną, zyskiem i linkiem wysyłany TYLKO gdy Gemini mówi TAK" },
                 ].map(s => (
                   <div key={s.t} style={{ background: "#070c17", borderRadius: 12, padding: 16 }}>
