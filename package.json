@@ -1,0 +1,11 @@
+{
+  "name": "dirtdealfinder",
+  "version": "1.0.0",
+  "description": "Automatyczny skaner okazyjnych rowerów dirtowych z Kleinanzeigen",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

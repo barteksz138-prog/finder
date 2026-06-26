@@ -1,0 +1,839 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DirtDealFinder 🚲</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #080d18; color: #e2e8f0; font-family: 'Inter', 'Segoe UI', sans-serif; font-size: 14px; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+    @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: #0d1526; }
+    ::-webkit-scrollbar-thumb { background: #2d3f5c; border-radius: 3px; }
+    input, select, textarea {
+      background: #111c2e !important; color: #e2e8f0 !important;
+      border: 1px solid #1e3352 !important; border-radius: 8px !important;
+      padding: 9px 12px !important; outline: none !important; width: 100%;
+      font-family: inherit; font-size: 13px;
+    }
+    input:focus, select:focus, textarea:focus {
+      border-color: #f59e0b !important;
+      box-shadow: 0 0 0 2px #f59e0b18 !important;
+    }
+    input::placeholder, textarea::placeholder { color: #334155 !important; }
+    button { cursor: pointer; font-family: inherit; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const BIKE_MODELS = [
+  { id: "specialized_p3",     label: "Specialized P.3",     query: "Specialized P3 dirt" },
+  { id: "dartmoor_two6player",label: "Dartmoor Two6player", query: "Dartmoor Two6player" },
+  { id: "canyon_stitched_360",label: "Canyon Stitched 360", query: "Canyon Stitched 360" },
+  { id: "trek_ticket",        label: "Trek Ticket",          query: "Trek Ticket dirt" },
+  { id: "rose_the_bruce",     label: "Rose The Bruce",       query: "Rose The Bruce dirt" },
+  { id: "radon_slush",        label: "Radon Slush",          query: "Radon Slush" },
+];
+
+const PROVIDERS = {
+  gemini: {
+    label: "Google Gemini",
+    models: [
+      { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+      { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash" },
+      { id: "gemini-1.5-pro",   label: "Gemini 1.5 Pro" },
+    ],
+    keyPlaceholder: "AIza...",
+    keyHint: "aistudio.google.com/apikey",
+  },
+  groq: {
+    label: "Groq (darmowy, bez karty)",
+    models: [
+      { id: "llama-3.3-70b-versatile",  label: "Llama 3.3 70B (zalecany)" },
+      { id: "llama-3.1-8b-instant",     label: "Llama 3.1 8B (szybki)" },
+      { id: "mixtral-8x7b-32768",       label: "Mixtral 8x7B" },
+    ],
+    keyPlaceholder: "gsk_...",
+    keyHint: "console.groq.com/keys",
+  },
+};
+
+const SC = {
+  analyzing: { bg: "#8b5cf622", color: "#a78bfa", border: "#8b5cf655", label: "Gemini analizuje…" },
+  deal:      { bg: "#22c55e22", color: "#22c55e", border: "#22c55e55", label: "✅ Okazja!" },
+  skip:      { bg: "#1e293b",   color: "#475569", border: "#1e293b",   label: "⏭ Pominięte" },
+  sent:      { bg: "#3b82f622", color: "#60a5fa", border: "#3b82f655", label: "📨 Wysłano" },
+  error:     { bg: "#ef444422", color: "#f87171", border: "#ef444455", label: "⚠️ Błąd" },
+};
+
+function Badge({ status }) {
+  const s = SC[status] || SC.skip;
+  return (
+    <span style={{ background: s.bg, color: s.color, border: `1px solid ${s.border}`,
+      borderRadius: 6, padding: "2px 10px", fontSize: 11, fontWeight: 700, letterSpacing: 0.4 }}>
+      {s.label}
+    </span>
+  );
+}
+
+function App() {
+  const [tab, setTab] = useState("scanner");
+
+  const [cfg] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ddf_cfg") || "{}"); } catch { return {}; }
+  });
+  const [geminiKey,      setGeminiKey]      = useState(cfg.geminiKey || "");
+  const [provider,       setProvider]       = useState(cfg.provider || "gemini");
+  const [geminiModel,    setGeminiModel]    = useState(cfg.geminiModel || "gemini-2.0-flash");
+  const [geminiChatName, setGeminiChatName] = useState(cfg.geminiChatName || "");
+  const [discordWebhook, setDiscordWebhook] = useState(cfg.discordWebhook || "");
+  const [discordThread,  setDiscordThread]  = useState(cfg.discordThread || "");
+  const [selectedBikes,  setSelectedBikes]  = useState(cfg.selectedBikes || BIKE_MODELS.map(b => b.id));
+
+  const [logs,     setLogs]     = useState([]);
+  const [results,  setResults]  = useState([]);
+  const [running,  setRunning]  = useState(false);
+  const [stats,    setStats]    = useState({ scanned: 0, deals: 0, sent: 0 });
+  const [cycleNum, setCycleNum] = useState(0);
+
+  const runningRef   = useRef(false);
+  const firstCycleRef = useRef(true); // cykl #1 = tylko zbieramy ID, nie analizujemy
+  const logsEndRef  = useRef(null);
+
+  // Zapamiętaj widziane ID między restartami
+  const loadSeenIds = () => {
+    try { return new Set(JSON.parse(localStorage.getItem("ddf_seen") || "[]")); } catch { return new Set(); }
+  };
+  const seenIdsRef = useRef(loadSeenIds());
+  const saveSeenId = (id) => {
+    seenIdsRef.current.add(id);
+    try {
+      const arr = [...seenIdsRef.current].slice(-2000); // max 2000 ID
+      localStorage.setItem("ddf_seen", JSON.stringify(arr));
+    } catch {}
+  };
+
+  useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
+
+  const saveSettings = () => {
+    const data = { geminiKey, geminiModel, geminiChatName, discordWebhook, discordThread, selectedBikes, provider };
+    localStorage.setItem("ddf_cfg", JSON.stringify(data));
+    addLog("💾 Ustawienia zapisane", "success");
+  };
+
+  const addLog = useCallback((msg, type = "info") => {
+    setLogs(prev => [...prev.slice(-499), {
+      time: new Date().toLocaleTimeString("pl-PL"), msg, type,
+    }]);
+  }, []);
+
+  // ── Proxy API calls ────────────────────────────────────────────────────
+  // Wywołanie AI — obsługuje Gemini i Groq
+  const callGemini = async (prompt) => {
+    if (provider === "groq") {
+      const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${geminiKey}`,
+        },
+        body: JSON.stringify({
+          model: geminiModel,
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.3,
+          max_tokens: 1024,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err?.error?.message || `HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      // Normalizuj do formatu Gemini żeby reszta kodu działała tak samo
+      const text = data?.choices?.[0]?.message?.content || "";
+      return { candidates: [{ content: { parts: [{ text }] }, finishReason: "STOP" }] };
+    } else {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`;
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 1024, responseMimeType: "application/json" },
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err?.error?.message || `HTTP ${resp.status}`);
+      }
+      return resp.json();
+    }
+  };
+
+  const callDiscord = async (payload) => {
+    const resp = await fetch("/api/discord", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ webhookUrl: discordWebhook, threadId: discordThread, payload }),
+    });
+    return resp.json();
+  };
+
+  const scrapeKleinanzeigen = async (query) => {
+    const url = `https://www.kleinanzeigen.de/s-fahrraeder/${encodeURIComponent(query)}/k0c217`;
+    const resp = await fetch(`/api/scrape?url=${encodeURIComponent(url)}`);
+    if (!resp.ok) throw new Error(`Scrape HTTP ${resp.status}`);
+    return resp.text();
+  };
+
+  // ── HTML parser ────────────────────────────────────────────────────────
+  const parseListings = (html, bikeLabel) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const items = [];
+    doc.querySelectorAll("article.aditem").forEach(article => {
+      const titleEl = article.querySelector(".ellipsis, h2");
+      const priceEl = article.querySelector(".aditem-main--middle--price-shipping--price");
+      const linkEl  = article.querySelector("a[href*='/s-anzeige/']");
+      const descEl  = article.querySelector(".aditem-main--middle--description");
+      const locEl   = article.querySelector(".aditem-main--top--left");
+      if (!titleEl || !linkEl) return;
+      const title = titleEl.textContent.trim();
+      const priceText = priceEl?.textContent?.trim() || "";
+      const priceMatch = priceText.match(/[\d.,]+/);
+      const price = priceMatch ? parseFloat(priceMatch[0].replace(",", ".")) : null;
+      const href = "https://www.kleinanzeigen.de" + linkEl.getAttribute("href");
+      const idMatch = href.match(/\/(\d+)$/);
+      const listingId = idMatch ? idMatch[1] : href;
+      items.push({
+        listingId, title, price, href,
+        desc:     descEl?.textContent?.trim() || "",
+        location: locEl?.textContent?.trim() || "",
+        bike:     bikeLabel,
+      });
+    });
+    return items;
+  };
+
+  // ── Gemini analysis ────────────────────────────────────────────────────
+  const analyzeWithGemini = async (listing) => {
+    const chatInfo = geminiChatName
+      ? `\nKontekst: Ta analiza idzie do chatu Gemini o nazwie "${geminiChatName}".`
+      : "";
+
+    const prompt = `Jesteś ekspertem od rowerów dirtowych (dirt jump / slopestyle). Kupujesz rowery w Niemczech i sprzedajesz je w Polsce z zyskiem.
+
+TWOJE DANE SPRZEDAŻOWE (rowery które już sprzedałeś w Polsce):
+- Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)
+- Canyon Stitched 360 Pro 2024 → 4000 zł (~930€)
+- Rose The Bruce 2 → 3800 zł (~880€)
+- Trek Ticket DJ (amortyzator Pike DJ/Bomber DJ) → 6000 zł (~1400€)
+- Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)
+
+ZASADA: Opłaca się TYLKO jeśli możesz sprzedać rower w Polsce za minimum 120% ceny zakupu z ogłoszenia (czyli zysk min. 20%). Nie uwzględniaj kosztów transportu.
+
+OCEŃ TO OGŁOSZENIE:
+Tytuł: ${listing.title}
+Cena z ogłoszenia: ${listing.price != null ? listing.price + "€" : "brak"}
+Lokalizacja: ${listing.location}
+Opis: ${listing.desc}
+Model: ${listing.bike}${chatInfo}
+
+Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
+{
+  "oplaca_sie": true lub false,
+  "przewidywany_zysk": liczba w EUR (cena sprzedaży w PL minus cena zakupu),
+  "krotki_opis": "max 2 zdania — stan roweru i dlaczego opłaca się lub nie"
+}`;
+
+    addLog(`🤖 Analizuję: ${listing.title}${listing.price != null ? ` za ${listing.price}€` : ""}`, "info");
+
+    // Retry loop — czeka gdy quota wyczerpana
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const data = await callGemini(prompt);
+
+        if (data?.error) {
+          const msg = data.error.message || "";
+          // Quota exceeded — wyciągnij czas retry i poczekaj
+          const retryMatch = msg.match(/retry in ([\d.]+)s/i);
+          const waitSec = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) + 2 : 60;
+          if (msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("429")) {
+            addLog(`⏳ Quota Gemini wyczerpana — czekam ${waitSec}s (próba ${attempt}/3)`, "error");
+            if (attempt < 3) { await sleep(waitSec * 1000); continue; }
+            else { addLog("❌ Quota wyczerpana — włącz billing w aistudio.google.com", "error"); return null; }
+          }
+          addLog(`⚠️ Gemini API error: ${msg}`, "error");
+          return null;
+        }
+
+        const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        if (!raw) {
+          const reason = data?.candidates?.[0]?.finishReason || "brak odpowiedzi";
+          addLog(`⚠️ Gemini pusta odpowiedź (${reason})`, "error");
+          return null;
+        }
+
+        let clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
+        const jsonMatch = clean.match(/\{[\s\S]*\}/);
+        if (jsonMatch) clean = jsonMatch[0];
+        return JSON.parse(clean);
+
+      } catch (e) {
+        addLog(`⚠️ Błąd parsowania Gemini: ${e.message}`, "error");
+        return null;
+      }
+    }
+    return null;
+  };
+
+  // ── Discord embed ──────────────────────────────────────────────────────
+  const sendToDiscord = async (listing, analysis) => {
+    const embed = {
+      title: `🚲 OKAZJA: ${listing.title}`,
+      url: listing.href,
+      color: 0x22c55e,
+      fields: [
+        { name: "💰 Cena z ogłoszenia", value: listing.price != null ? `**${listing.price}€**` : "brak", inline: true },
+        { name: "✅ Opłaca się",        value: analysis.oplaca_sie ? "**TAK**" : "**NIE**", inline: true },
+        { name: "🤑 Przewidywany zysk", value: `**~${analysis.przewidywany_zysk}€**`, inline: true },
+        { name: "📍 Lokalizacja",       value: listing.location || "–", inline: true },
+        { name: "🚴 Model",             value: listing.bike, inline: true },
+        { name: "🔗 Link do ogłoszenia",value: listing.href },
+        { name: "📝 Krótki opis",       value: analysis.krotki_opis },
+      ],
+      footer: { text: `DirtDealFinder • ${new Date().toLocaleString("pl-PL")}` },
+    };
+    try {
+      const r = await callDiscord({ embeds: [embed] });
+      return r.ok;
+    } catch (e) {
+      addLog(`❌ Discord: ${e.message}`, "error");
+      return false;
+    }
+  };
+
+  // ── Demo fallback ──────────────────────────────────────────────────────
+  const demoListings = (bike) => [
+    { listingId: `demo-${bike.id}-A-${Date.now()}`, title: `${bike.label} 2022 sehr guter Zustand`,
+      price: 650, desc: "Kaum benutzt, Neupreis 1200€.", location: "München",
+      href: `https://www.kleinanzeigen.de/s-anzeige/demo-A-${Date.now()}`, bike: bike.label },
+    { listingId: `demo-${bike.id}-B-${Date.now()}`, title: `${bike.label} gebraucht`,
+      price: 380, desc: "Guter Zustand, kleine Gebrauchsspuren.", location: "Berlin",
+      href: `https://www.kleinanzeigen.de/s-anzeige/demo-B-${Date.now()}`, bike: bike.label },
+  ];
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  // ── One full scan cycle ────────────────────────────────────────────────
+  const runOneCycle = useCallback(async (cycleN) => {
+    const activeBikes = BIKE_MODELS.filter(b => selectedBikes.includes(b.id));
+    addLog(`🔄 Cykl #${cycleN} — sprawdzam ${activeBikes.length} modeli`, "success");
+
+    for (const bike of activeBikes) {
+      if (!runningRef.current) return;
+      addLog(`🔍 ${bike.label}…`, "info");
+
+      let listings = [];
+      try {
+        const html = await scrapeKleinanzeigen(bike.query);
+        listings = parseListings(html, bike.label);
+        if (listings.length === 0) {
+          addLog(`⚠️ Brak wyników dla ${bike.label} – demo`, "error");
+          listings = demoListings(bike);
+        } else {
+          addLog(`📋 ${bike.label}: ${listings.length} ogłoszeń łącznie`, "info");
+        }
+      } catch (e) {
+        addLog(`⚠️ ${bike.label}: ${e.message} – demo`, "error");
+        listings = demoListings(bike);
+      }
+
+      const fresh = listings.filter(l => !seenIdsRef.current.has(l.listingId));
+
+      if (firstCycleRef.current) {
+        // Cykl #1 — tylko zapamiętaj istniejące ID, nie analizuj
+        fresh.forEach(l => saveSeenId(l.listingId));
+        addLog(`📌 ${bike.label}: zapamiętano ${fresh.length} istniejących ogłoszeń`, "info");
+        continue;
+      }
+
+      if (fresh.length === 0) {
+        addLog(`✔ ${bike.label}: brak nowych`, "info");
+      } else {
+        addLog(`🆕 ${bike.label}: ${fresh.length} nowych ogłoszeń`, "success");
+        setStats(s => ({ ...s, scanned: s.scanned + fresh.length }));
+      }
+
+      for (const listing of fresh) {
+        if (!runningRef.current) return;
+        saveSeenId(listing.listingId);
+
+        const analysis = await analyzeWithGemini(listing);
+        let status = "skip";
+
+        if (!analysis) {
+          status = "error";
+        } else if (analysis.oplaca_sie === true) {
+          // ✅ Gemini mówi TAK → wysyłaj webhook
+          addLog(`✅ OKAZJA! ${listing.title} | zysk: ~${analysis.przewidywany_zysk}€`, "success");
+          setStats(s => ({ ...s, deals: s.deals + 1 }));
+          const sent = await sendToDiscord(listing, analysis);
+          status = sent ? "sent" : "deal";
+          if (sent) {
+            setStats(s => ({ ...s, sent: s.sent + 1 }));
+            addLog(`📨 Wysłano na Discord: ${listing.href}`, "success");
+          } else {
+            addLog(`⚠️ Nie udało się wysłać na Discord`, "error");
+          }
+        } else {
+          // ❌ Gemini mówi NIE → nie wysyłaj
+          addLog(`⏭ Gemini: NIE opłaca się (${listing.title})`, "info");
+        }
+
+        setResults(prev => [{
+          id: Date.now() + Math.random(), listing, analysis, status,
+          timestamp: new Date().toLocaleTimeString("pl-PL"),
+        }, ...prev].slice(0, 400));
+
+        await sleep(5000);
+      }
+
+      await sleep(3000);
+    }
+
+    firstCycleRef.current = false;
+    addLog(`✔ Cykl #${cycleN} zakończony — czekam 60s przed kolejnym`, "info");
+  }, [geminiKey, geminiModel, geminiChatName, discordWebhook, discordThread, selectedBikes]);
+
+  // ── Continuous loop ────────────────────────────────────────────────────
+  const startLoop = async () => {
+    if (!geminiKey)      { addLog("❌ Brak klucza Gemini API", "error"); setTab("settings"); return; }
+    if (!discordWebhook) { addLog("❌ Brak Discord Webhook",    "error"); setTab("settings"); return; }
+
+    runningRef.current = true;
+    firstCycleRef.current = true;
+    setRunning(true);
+    setStats({ scanned: 0, deals: 0, sent: 0 });
+    addLog("🚀 Uruchamiam skanowanie — zbieram istniejące ogłoszenia (cykl #1), od cyklu #2 analizuję tylko nowe", "success");
+
+    let n = 1;
+    while (runningRef.current) {
+      setCycleNum(n);
+      await runOneCycle(n);
+      if (!runningRef.current) break;
+      for (let i = 60; i > 0 && runningRef.current; i--) {
+        await sleep(1000);
+      }
+      n++;
+    }
+
+    setRunning(false);
+    addLog("⏹ Zatrzymano", "info");
+  };
+
+  const stopLoop = () => { runningRef.current = false; };
+
+  const logColors = { info: "#475569", success: "#22c55e", error: "#f87171" };
+
+  // ── RENDER ─────────────────────────────────────────────────────────────
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+
+      {/* HEADER */}
+      <div style={{
+        background: "#0c1525", borderBottom: "1px solid #1a2d4a",
+        padding: "14px 24px",
+        display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{
+            width: 40, height: 40, borderRadius: 10,
+            background: "linear-gradient(135deg, #f59e0b 0%, #ef4444 100%)",
+            display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20,
+          }}>🚲</div>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 800, letterSpacing: -0.5 }}>
+              DirtDeal<span style={{ color: "#f59e0b" }}>Finder</span>
+            </div>
+            <div style={{ fontSize: 10, color: "#334155", letterSpacing: 0.8, textTransform: "uppercase" }}>
+              Kleinanzeigen × Gemini AI × Discord
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+          {[["🔍", stats.scanned, "Nowe"], ["✅", stats.deals, "Okazje"], ["📨", stats.sent, "Wysłane"]].map(([ico, n, lbl]) => (
+            <div key={lbl} style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 18, fontWeight: 800 }}>{ico} {n}</div>
+              <div style={{ fontSize: 10, color: "#475569", textTransform: "uppercase" }}>{lbl}</div>
+            </div>
+          ))}
+          {running && (
+            <div style={{ background: "#0a1520", border: "1px solid #22c55e44", borderRadius: 8, padding: "6px 14px", textAlign: "center" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#22c55e", display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#22c55e", display: "inline-block",
+                  animation: "pulse 1.2s infinite" }} />
+                Cykl #{cycleNum}
+              </div>
+              <div style={{ fontSize: 10, color: "#475569" }}>aktywne skanowanie</div>
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 4 }}>
+          {[["scanner","🔍 Skaner"], ["results","📋 Wyniki"], ["settings","⚙️ Ustawienia"]].map(([id, label]) => (
+            <button key={id} onClick={() => setTab(id)} style={{
+              padding: "8px 16px", borderRadius: 8, border: "none", fontWeight: 600, fontSize: 13,
+              background: tab === id ? "#f59e0b" : "#1e293b",
+              color: tab === id ? "#0a0f18" : "#64748b",
+            }}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      {/* BODY */}
+      <div style={{ flex: 1, padding: 24, maxWidth: 1200, width: "100%", margin: "0 auto" }}>
+
+        {/* ═══ SCANNER ═══ */}
+        {tab === "scanner" && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 280px", gap: 20 }}>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+              {/* Bike selector */}
+              <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 14, padding: 20 }}>
+                <div style={{ fontSize: 11, color: "#475569", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 12 }}>
+                  Modele do skanowania
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {BIKE_MODELS.map(b => {
+                    const sel = selectedBikes.includes(b.id);
+                    return (
+                      <button key={b.id} onClick={() => setSelectedBikes(prev =>
+                        sel ? prev.filter(x => x !== b.id) : [...prev, b.id]
+                      )} style={{
+                        padding: "7px 14px", borderRadius: 8, fontWeight: 600, fontSize: 13,
+                        border: `1px solid ${sel ? "#f59e0b88" : "#1e293b"}`,
+                        background: sel ? "#f59e0b18" : "#0f172a",
+                        color: sel ? "#f59e0b" : "#475569",
+                      }}>{b.label}</button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* START / STOP */}
+              <div style={{ display: "flex", gap: 10 }}>
+                {!running ? (
+                  <button onClick={startLoop} style={{
+                    flex: 1, padding: "14px 0", borderRadius: 10, border: "none",
+                    fontWeight: 800, fontSize: 15,
+                    background: "linear-gradient(135deg, #f59e0b, #ef4444)",
+                    color: "#080d18",
+                  }}>▶ Start — skanuj ciągle</button>
+                ) : (
+                  <button onClick={stopLoop} style={{
+                    flex: 1, padding: "14px 0", borderRadius: 10,
+                    border: "1px solid #ef444466", background: "#ef444418",
+                    color: "#f87171", fontWeight: 800, fontSize: 15,
+                  }}>⏹ Stop</button>
+                )}
+              </div>
+
+              {/* Log */}
+              <div style={{
+                background: "#070c17", border: "1px solid #0f1a2e", borderRadius: 14,
+                height: 400, overflowY: "auto", padding: 14,
+                fontFamily: "monospace", fontSize: 12, lineHeight: 1.7,
+              }}>
+                {logs.length === 0 && (
+                  <div style={{ color: "#1e293b", textAlign: "center", marginTop: 80 }}>
+                    Kliknij Start, żeby zacząć…
+                  </div>
+                )}
+                {logs.map((l, i) => (
+                  <div key={i} style={{ color: logColors[l.type] || "#475569" }}>
+                    <span style={{ color: "#1e3352" }}>{l.time} </span>{l.msg}
+                  </div>
+                ))}
+                <div ref={logsEndRef} />
+              </div>
+            </div>
+
+            {/* Right panel */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+              {/* Logika */}
+              <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 14, padding: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 14, color: "#94a3b8" }}>🤖 Logika decyzji</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ background: "#0a1f0f", border: "1px solid #22c55e33", borderRadius: 10, padding: 12 }}>
+                    <div style={{ color: "#22c55e", fontWeight: 700, fontSize: 12, marginBottom: 4 }}>✅ Gemini mówi TAK</div>
+                    <div style={{ fontSize: 11, color: "#475569", lineHeight: 1.5 }}>
+                      Webhook Discord wysłany z ceną, zyskiem i linkiem do ogłoszenia
+                    </div>
+                  </div>
+                  <div style={{ background: "#1a0f0f", border: "1px solid #ef444433", borderRadius: 10, padding: 12 }}>
+                    <div style={{ color: "#f87171", fontWeight: 700, fontSize: 12, marginBottom: 4 }}>❌ Gemini mówi NIE</div>
+                    <div style={{ fontSize: 11, color: "#475569", lineHeight: 1.5 }}>
+                      Ogłoszenie pominięte, webhook nie wysłany
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Status */}
+              <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 14, padding: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 14, color: "#94a3b8" }}>📊 Status</div>
+                {[
+                  ["Gemini API",    geminiKey      ? "✅ OK" : "❌ Brak", geminiKey      ? "#22c55e" : "#f87171"],
+                  ["Discord",       discordWebhook ? "✅ OK" : "❌ Brak", discordWebhook ? "#22c55e" : "#f87171"],
+                  ["Aktywne modele",`${selectedBikes.length}/${BIKE_MODELS.length}`, "#f59e0b"],
+                  ["Widzianych ID", seenIdsRef.current.size, "#64748b"],
+                ].map(([k, v, c]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between", marginBottom: 8, fontSize: 13 }}>
+                    <span style={{ color: "#475569" }}>{k}</span>
+                    <span style={{ color: c, fontWeight: 600 }}>{v}</span>
+                  </div>
+                ))}
+              <button onClick={() => {
+                seenIdsRef.current = new Set();
+                localStorage.removeItem("ddf_seen");
+                addLog("🗑 Reset — następny cykl przeskanuje wszystko od nowa", "info");
+              }} style={{
+                width: "100%", marginTop: 10, padding: "7px 0", borderRadius: 8,
+                border: "1px solid #1e293b", background: "transparent",
+                color: "#475569", fontSize: 11, fontWeight: 600,
+              }}>🗑 Reset zapamiętanych ogłoszeń</button>
+            </div>
+
+            <div style={{ background: "#070f1e", border: "1px solid #0f1f36", borderRadius: 14, padding: 16, fontSize: 12, color: "#334155", lineHeight: 1.7 }}>
+                🔄 Sprawdza każdy model co ~60s<br/>
+                🆕 Tylko <strong style={{ color: "#475569" }}>nowe ogłoszenia</strong> trafiają do Gemini<br/>
+                📨 Discord tylko gdy Gemini = <strong style={{ color: "#22c55e" }}>TAK</strong>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ RESULTS ═══ */}
+        {tab === "results" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>Wyniki ({results.length})</div>
+              {results.length > 0 && (
+                <button onClick={() => setResults([])} style={{
+                  padding: "6px 14px", borderRadius: 8, border: "1px solid #ef444433",
+                  background: "#ef444411", color: "#f87171", fontSize: 12, fontWeight: 600,
+                }}>🗑 Wyczyść</button>
+              )}
+            </div>
+
+            {results.length === 0 ? (
+              <div style={{ background: "#0d1526", border: "1px dashed #1a2d4a", borderRadius: 16,
+                padding: 60, textAlign: "center", color: "#1e293b" }}>
+                <div style={{ fontSize: 48, marginBottom: 12 }}>🚲</div>
+                Uruchom skanowanie — wyniki pojawią się tutaj.
+              </div>
+            ) : results.map(r => (
+              <div key={r.id} style={{
+                background: "#0d1526",
+                border: `1px solid ${r.status === "sent" ? "#3b82f633" : r.status === "deal" ? "#22c55e33" : "#1a2d4a"}`,
+                borderRadius: 14, padding: 18, marginBottom: 10,
+                display: "grid", gridTemplateColumns: "1fr auto", gap: 16, alignItems: "start",
+              }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                    <Badge status={r.status} />
+                    <span style={{ color: "#f59e0b", fontSize: 11 }}>{r.listing.bike}</span>
+                    <span style={{ color: "#1e3352", fontSize: 11 }}>• {r.timestamp}</span>
+                  </div>
+                  <a href={r.listing.href} target="_blank" rel="noopener noreferrer"
+                    style={{ color: "#e2e8f0", fontWeight: 600, textDecoration: "none", fontSize: 14 }}>
+                    {r.listing.title}
+                  </a>
+                  {r.analysis && (
+                    <div style={{ marginTop: 6, color: "#64748b", fontSize: 12 }}>{r.analysis.krotki_opis}</div>
+                  )}
+                  <div style={{ marginTop: 6 }}>
+                    <a href={r.listing.href} target="_blank" rel="noopener noreferrer"
+                      style={{ color: "#3b82f6", fontSize: 11, textDecoration: "underline" }}>
+                      🔗 {r.listing.href}
+                    </a>
+                  </div>
+                </div>
+                {r.analysis && r.listing.price != null && (
+                  <div style={{ textAlign: "right", minWidth: 120 }}>
+                    <div style={{ fontSize: 11, color: "#475569", marginBottom: 2 }}>Cena z ogłoszenia</div>
+                    <div style={{ fontSize: 20, fontWeight: 800 }}>{r.listing.price}€</div>
+                    <div style={{ marginTop: 8, fontSize: 11, color: "#475569", marginBottom: 2 }}>Opłaca się</div>
+                    <div style={{ fontSize: 15, fontWeight: 800,
+                      color: r.analysis.oplaca_sie ? "#22c55e" : "#f87171" }}>
+                      {r.analysis.oplaca_sie ? "✅ TAK" : "❌ NIE"}
+                    </div>
+                    <div style={{ marginTop: 8, fontSize: 11, color: "#475569", marginBottom: 2 }}>Przewidywany zysk</div>
+                    <div style={{ fontSize: 16, fontWeight: 800,
+                      color: r.analysis.oplaca_sie ? "#22c55e" : "#475569" }}>
+                      ~{r.analysis.przewidywany_zysk}€
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ═══ SETTINGS ═══ */}
+        {tab === "settings" && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+
+            {/* AI Provider */}
+            <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 16, padding: 24 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 20, display: "flex", alignItems: "center", gap: 10 }}>
+                <span>🤖</span> AI Provider
+              </div>
+
+              {/* Provider toggle */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Dostawca AI
+                </label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {Object.entries(PROVIDERS).map(([id, p]) => (
+                    <button key={id} onClick={() => {
+                      setProvider(id);
+                      setGeminiModel(p.models[0].id);
+                    }} style={{
+                      flex: 1, padding: "10px 8px", borderRadius: 8, fontWeight: 600, fontSize: 12,
+                      border: `1px solid ${provider === id ? "#f59e0b88" : "#1e293b"}`,
+                      background: provider === id ? "#f59e0b18" : "#0f172a",
+                      color: provider === id ? "#f59e0b" : "#475569",
+                    }}>{p.label}</button>
+                  ))}
+                </div>
+                {provider === "groq" && (
+                  <div style={{ marginTop: 8, background: "#0a1f0f", border: "1px solid #22c55e33", borderRadius: 8, padding: "8px 12px", fontSize: 11, color: "#22c55e" }}>
+                    ✅ Darmowy, bez karty — 14 400 req/dzień. Zarejestruj się na console.groq.com
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Klucz API *
+                </label>
+                <input type="password" placeholder={PROVIDERS[provider].keyPlaceholder}
+                  value={geminiKey} onChange={e => setGeminiKey(e.target.value)} />
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>{PROVIDERS[provider].keyHint}</div>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Model
+                </label>
+                <select value={geminiModel} onChange={e => setGeminiModel(e.target.value)}>
+                  {PROVIDERS[provider].models.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                </select>
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#f59e0b", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  ★ Kontekst (opcjonalne)
+                </label>
+                <input type="text" placeholder="np. Bike Deals Analyzer"
+                  value={geminiChatName} onChange={e => setGeminiChatName(e.target.value)} />
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>
+                  Dodatkowy kontekst dodawany do każdego promptu
+                </div>
+              </div>
+            </div>
+
+            {/* Discord */}
+            <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 16, padding: 24 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 20, display: "flex", alignItems: "center", gap: 10 }}>
+                <span>💬</span> Discord
+              </div>
+
+              <div style={{ marginBottom: 14 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Webhook URL *
+                </label>
+                <input type="password" placeholder="https://discord.com/api/webhooks/..."
+                  value={discordWebhook} onChange={e => setDiscordWebhook(e.target.value)} />
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 5 }}>
+                  Kanał → Edytuj → Integracje → Webhooki
+                </div>
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Thread ID (opcjonalne)
+                </label>
+                <input type="text" placeholder="ID wątku"
+                  value={discordThread} onChange={e => setDiscordThread(e.target.value)} />
+              </div>
+
+              <button onClick={async () => {
+                if (!discordWebhook) { addLog("❌ Brak webhook URL", "error"); return; }
+                try {
+                  const r = await callDiscord({ content: "✅ **DirtDealFinder** połączony! Okazje będą tu trafiać 🚲" });
+                  if (r.ok) addLog("✅ Test Discord – OK!", "success");
+                  else addLog(`❌ Webhook błąd ${r.status}`, "error");
+                } catch (e) { addLog(`❌ ${e.message}`, "error"); }
+              }} style={{
+                width: "100%", padding: "10px 0", borderRadius: 10,
+                border: "1px solid #5865f255", background: "#5865f218",
+                color: "#7c8cf8", fontWeight: 700, fontSize: 13,
+              }}>📡 Test webhook</button>
+            </div>
+
+            {/* Save */}
+            <div style={{ gridColumn: "span 2" }}>
+              <button onClick={saveSettings} style={{
+                width: "100%", padding: "14px 0", borderRadius: 12, border: "none",
+                fontWeight: 800, fontSize: 15,
+                background: "linear-gradient(135deg, #f59e0b, #ef4444)",
+                color: "#080d18",
+              }}>💾 Zapisz ustawienia</button>
+            </div>
+
+            {/* How it works */}
+            <div style={{ gridColumn: "span 2", background: "#0d1526", border: "1px solid #1a3a5f", borderRadius: 16, padding: 24 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 14, color: "#3b82f6" }}>ℹ️ Jak to działa?</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 14 }}>
+                {[
+                  { ico: "🔄", t: "Pętla ciągła",  d: "Skanuje bez przerwy — po każdym pełnym cyklu czeka 60s i zaczyna od nowa" },
+                  { ico: "🆕", t: "Tylko nowe",     d: "Każde ogłoszenie trafia do Gemini tylko raz — widziane ID są zapamiętane" },
+                  { ico: "🤖", t: "Gemini AI",      d: "Ocenia czy warto kupić i odsprzedać w Polsce. Zwraca: opłaca_sie, przewidywany_zysk, opis" },
+                  { ico: "📨", t: "Discord",        d: "Webhook z ceną, zyskiem i linkiem wysyłany TYLKO gdy Gemini mówi TAK" },
+                ].map(s => (
+                  <div key={s.t} style={{ background: "#070c17", borderRadius: 12, padding: 16 }}>
+                    <div style={{ fontSize: 22, marginBottom: 8 }}>{s.ico}</div>
+                    <div style={{ fontWeight: 700, marginBottom: 6, fontSize: 13 }}>{s.t}</div>
+                    <div style={{ fontSize: 12, color: "#475569", lineHeight: 1.6 }}>{s.d}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
