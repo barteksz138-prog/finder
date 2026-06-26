@@ -95,6 +95,12 @@ function App() {
   const [provider,       setProvider]       = useState(cfg.provider || "gemini");
   const [geminiModel,    setGeminiModel]    = useState(cfg.geminiModel || "gemini-2.0-flash");
   const [geminiChatName, setGeminiChatName] = useState(cfg.geminiChatName || "");
+  const [minProfit,      setMinProfit]      = useState(cfg.minProfit || 20);
+  const [salesHistory,   setSalesHistory]   = useState(cfg.salesHistory || `Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)
+Canyon Stitched 360 Pro 2024 → 4000 zł (~930€)
+Rose The Bruce 2 → 3800 zł (~880€)
+Trek Ticket DJ (amortyzator Pike DJ/Bomber DJ) → 6000 zł (~1400€)
+Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)`);
   const [discordWebhook, setDiscordWebhook] = useState(cfg.discordWebhook || "");
   const [discordThread,  setDiscordThread]  = useState(cfg.discordThread || "");
   const [selectedBikes,  setSelectedBikes]  = useState(cfg.selectedBikes || BIKE_MODELS.map(b => b.id));
@@ -125,7 +131,7 @@ function App() {
   useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
 
   const saveSettings = () => {
-    const data = { geminiKey, geminiModel, geminiChatName, discordWebhook, discordThread, selectedBikes, provider };
+    const data = { geminiKey, geminiModel, geminiChatName, discordWebhook, discordThread, selectedBikes, provider, minProfit, salesHistory };
     localStorage.setItem("ddf_cfg", JSON.stringify(data));
     addLog("💾 Ustawienia zapisane", "success");
   };
@@ -200,20 +206,48 @@ function App() {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, "text/html");
     const items = [];
-    doc.querySelectorAll("article.aditem").forEach(article => {
-      const titleEl = article.querySelector(".ellipsis, h2");
-      const priceEl = article.querySelector(".aditem-main--middle--price-shipping--price");
-      const linkEl  = article.querySelector("a[href*='/s-anzeige/']");
-      const descEl  = article.querySelector(".aditem-main--middle--description");
-      const locEl   = article.querySelector(".aditem-main--top--left");
-      if (!titleEl || !linkEl) return;
-      const title = titleEl.textContent.trim();
-      const priceText = priceEl?.textContent?.trim() || "";
-      const priceMatch = priceText.match(/[\d.,]+/);
-      const price = priceMatch ? parseFloat(priceMatch[0].replace(",", ".")) : null;
-      const href = "https://www.kleinanzeigen.de" + linkEl.getAttribute("href");
-      const idMatch = href.match(/\/(\d+)$/);
+
+    // Sprawdź czy Kleinanzeigen nie zablokował
+    const bodyText = doc.body?.innerText || doc.body?.textContent || "";
+    if (bodyText.includes("captcha") || bodyText.includes("robot") || bodyText.includes("blocked")) {
+      addLog("⚠️ Kleinanzeigen wykrył bota — captcha!", "error");
+      return [];
+    }
+
+    // Próbuj różne selektory — Kleinanzeigen zmienia strukturę
+    const articles = doc.querySelectorAll("article.aditem, li.aditem, [data-adid], .ad-listitem");
+
+    articles.forEach(article => {
+      // Link i ID — najważniejsze
+      const linkEl = article.querySelector("a[href*='/s-anzeige/'], a[href*='/anzeige/']");
+      if (!linkEl) return;
+      const href = linkEl.getAttribute("href").startsWith("http")
+        ? linkEl.getAttribute("href")
+        : "https://www.kleinanzeigen.de" + linkEl.getAttribute("href");
+
+      const idMatch = href.match(/-(\d{7,})/);
       const listingId = idMatch ? idMatch[1] : href;
+
+      // Tytuł
+      const titleEl = article.querySelector("h2, h3, .ellipsis, .aditem-main--middle--headline, [class*=headline], [class*=title]");
+      const title = titleEl?.textContent?.trim() || linkEl.textContent.trim();
+      if (!title) return;
+
+      // Cena
+      const priceEl = article.querySelector("[class*=price], .aditem-main--middle--price-shipping--price");
+      const priceText = priceEl?.textContent?.trim() || "";
+      const priceMatch = priceText.match(/([\d.]+),([\d]+)|(\d[\d.]*)/);
+      let price = null;
+      if (priceMatch) {
+        const raw = priceMatch[0].replace(/\./g, "").replace(",", ".");
+        price = parseFloat(raw);
+        if (isNaN(price)) price = null;
+      }
+
+      // Opis i lokalizacja
+      const descEl = article.querySelector("[class*=description], .aditem-main--middle--description");
+      const locEl  = article.querySelector("[class*=locality], [class*=location], .aditem-main--top--left");
+
       items.push({
         listingId, title, price, href,
         desc:     descEl?.textContent?.trim() || "",
@@ -221,6 +255,7 @@ function App() {
         bike:     bikeLabel,
       });
     });
+
     return items;
   };
 
@@ -233,13 +268,9 @@ function App() {
     const prompt = `Jesteś ekspertem od rowerów dirtowych (dirt jump / slopestyle). Kupujesz rowery w Niemczech i sprzedajesz je w Polsce z zyskiem.
 
 TWOJE DANE SPRZEDAŻOWE (rowery które już sprzedałeś w Polsce):
-- Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)
-- Canyon Stitched 360 Pro 2024 → 4000 zł (~930€)
-- Rose The Bruce 2 → 3800 zł (~880€)
-- Trek Ticket DJ (amortyzator Pike DJ/Bomber DJ) → 6000 zł (~1400€)
-- Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)
+${salesHistory.split("\n").map(l => l.trim()).filter(Boolean).map(l => "- " + l).join("\n")}
 
-ZASADA: Opłaca się TYLKO jeśli możesz sprzedać rower w Polsce za minimum 120% ceny zakupu z ogłoszenia (czyli zysk min. 20%). Nie uwzględniaj kosztów transportu.
+ZASADA: Opłaca się TYLKO jeśli możesz sprzedać rower w Polsce za minimum ${100 + Number(minProfit)}% ceny zakupu z ogłoszenia (czyli zysk min. ${minProfit}%). Nie uwzględniaj kosztów transportu.
 
 OCEŃ TO OGŁOSZENIE:
 Tytuł: ${listing.title}
@@ -346,16 +377,11 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
       let listings = [];
       try {
         const html = await scrapeKleinanzeigen(bike.query);
+        addLog(`📥 ${bike.label}: pobrano ${html.length} znaków HTML`, "info");
         listings = parseListings(html, bike.label);
-        if (listings.length === 0) {
-          addLog(`⚠️ Brak wyników dla ${bike.label} – demo`, "error");
-          listings = demoListings(bike);
-        } else {
-          addLog(`📋 ${bike.label}: ${listings.length} ogłoszeń łącznie`, "info");
-        }
+        addLog(`📋 ${bike.label}: znaleziono ${listings.length} ogłoszeń`, listings.length > 0 ? "info" : "error");
       } catch (e) {
-        addLog(`⚠️ ${bike.label}: ${e.message} – demo`, "error");
-        listings = demoListings(bike);
+        addLog(`⚠️ ${bike.label}: błąd scraping — ${e.message}`, "error");
       }
 
       const fresh = listings.filter(l => !seenIdsRef.current.has(l.listingId));
@@ -795,6 +821,59 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
                 border: "1px solid #5865f255", background: "#5865f218",
                 color: "#7c8cf8", fontWeight: 700, fontSize: 13,
               }}>📡 Test webhook</button>
+            </div>
+
+            {/* Strategia */}
+            <div style={{ gridColumn: "span 2", background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 16, padding: 24 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 20, display: "flex", alignItems: "center", gap: 10 }}>
+                <span>🎯</span> Strategia oceny
+              </div>
+
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ fontSize: 11, color: "#475569", display: "block", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 }}>
+                  Minimalny zysk (%)
+                </label>
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <input
+                    type="range" min="5" max="100" step="5"
+                    value={minProfit}
+                    onChange={e => setMinProfit(Number(e.target.value))}
+                    style={{ flex: 1, accentColor: "#f59e0b", padding: 0, border: "none", background: "transparent" }}
+                  />
+                  <div style={{
+                    minWidth: 64, textAlign: "center", fontWeight: 800, fontSize: 22, color: "#f59e0b",
+                  }}>{minProfit}%</div>
+                </div>
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 4 }}>
+                  Gemini powie TAK tylko gdy szacowany zysk wynosi minimum {minProfit}% ceny zakupu
+                </div>
+              </div>
+
+              <div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <label style={{ fontSize: 11, color: "#475569", textTransform: "uppercase", letterSpacing: 0.8 }}>
+                    Historia sprzedaży (jeden rower na linię)
+                  </label>
+                  <button onClick={() => setSalesHistory(`Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)
+Canyon Stitched 360 Pro 2024 → 4000 zł (~930€)
+Rose The Bruce 2 → 3800 zł (~880€)
+Trek Ticket DJ (amortyzator Pike DJ/Bomber DJ) → 6000 zł (~1400€)
+Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)`)} style={{
+                    padding: "4px 10px", borderRadius: 6, border: "1px solid #1e293b",
+                    background: "transparent", color: "#475569", fontSize: 11,
+                  }}>↩ Przywróć domyślne</button>
+                </div>
+                <textarea
+                  rows={7}
+                  value={salesHistory}
+                  onChange={e => setSalesHistory(e.target.value)}
+                  placeholder={"Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)\nRose The Bruce 2 → 3800 zł (~880€)"}
+                  style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 1.7, resize: "vertical" }}
+                />
+                <div style={{ fontSize: 11, color: "#334155", marginTop: 4 }}>
+                  Na podstawie tych danych Gemini szacuje ile możesz dostać za podobny rower w Polsce
+                </div>
+              </div>
             </div>
 
             {/* Save */}
