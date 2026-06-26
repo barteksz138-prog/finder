@@ -74,20 +74,26 @@ Jak znaleźć nazwę chatu:
 
 ## Jak działa skanowanie
 
-1. Backend pobiera HTML z Kleinanzeigen dla każdego modelu
+1. Backend pobiera HTML z Kleinanzeigen dla każdego modelu (oraz dla kategorii "MTB Full")
 2. Parser wyciąga tytuły, ceny, lokalizacje
 3. Nowe ogłoszenia (niewidziane wcześniej) trafiają do Gemini
-4. Gemini ocenia: czy warto kupić i odsprzedać z zyskiem w Polsce?
-5. Jeśli TAK i zysk ≥ minimum → embed Discord wysłany automatycznie
-6. Auto-skan co N minut działa przez cały czas
+4. Gemini najpierw rozpoznaje **typ roweru**: `full` (pełna amortyzacja), `dirt` (dirt jump/slopestyle) albo `inny` (wszystko poza tym — szosówka, hardtail XC, miejski, elektryczny itd.)
+5. Jeśli typ to `inny` → ogłoszenie jest **odrzucane automatycznie**, niezależnie od ceny
+6. Jeśli typ to `full` lub `dirt` → Gemini ocenia: czy warto kupić i odsprzedać z zyskiem w Polsce?
+7. Jeśli TAK i zysk ≥ minimum → embed Discord wysłany automatycznie (z nazwą, typem, ceną, zyskiem i opłacalnością)
+8. Auto-skan co N minut działa przez cały czas
 
 ---
 
 ## Modele rowerów (można edytować w kodzie)
 
+**Konkretne modele dirt:**
 - Specialized P.3
 - Dartmoor Two6player
 - Canyon Stitched 360
 - Trek Ticket
 - Rose The Bruce
 - Radon Slush
+
+**Kategoria (bez wpisywania konkretnej nazwy):**
+- 🏔️ MTB Full — skanuje całą kategorię "Mountainbike" na Kleinanzeigen (`/s-fahrraeder/mountainbike/k0c217`). To Gemini decyduje, które z tych ogłoszeń są faktycznie full-suspension, a które trzeba odrzucić jako "inny" typ.

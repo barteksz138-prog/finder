@@ -42,7 +42,21 @@ const BIKE_MODELS = [
   { id: "trek_ticket",        label: "Trek Ticket",          query: "Trek Ticket dirt" },
   { id: "rose_the_bruce",     label: "Rose The Bruce",       query: "Rose The Bruce dirt" },
   { id: "radon_slush",        label: "Radon Slush",          query: "Radon Slush" },
+  // ── Rowery FULL (pełna amortyzacja) ──────────────────────────────────
+  // To nie jest konkretny model — to cała kategoria "Mountainbike" na
+  // Kleinanzeigen (https://www.kleinanzeigen.de/s-fahrraeder/mountainbike/k0c217).
+  // Zamiast wpisywać nazwę roweru, skanujemy całą kategorię MTB, a to
+  // Gemini decyduje (na podstawie tytułu/opisu), czy dany rower to faktycznie
+  // full-suspension, dirt, czy "inny" (i wtedy odrzuca ogłoszenie).
+  { id: "mtb_full_category", label: "🏔️ MTB Full (cała kategoria)", query: "mountainbike", isCategory: true },
 ];
+
+// Etykiety typu roweru zwracanego przez Gemini
+const TYPE_LABELS = {
+  full: { label: "🟢 Full",  color: "#22c55e" },
+  dirt: { label: "🟠 Dirt",  color: "#f59e0b" },
+  inny: { label: "⚫ Inny",  color: "#475569" },
+};
 
 const PROVIDERS = {
   gemini: {
@@ -265,25 +279,33 @@ Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, most
       ? `\nKontekst: Ta analiza idzie do chatu Gemini o nazwie "${geminiChatName}".`
       : "";
 
-    const prompt = `Jesteś ekspertem od rowerów dirtowych (dirt jump / slopestyle). Kupujesz rowery w Niemczech i sprzedajesz je w Polsce z zyskiem.
+    const prompt = `Jesteś ekspertem od rowerów MTB — zarówno dirtowych (dirt jump / slopestyle, sztywna rama bez tylnego zawieszenia) jak i FULL (pełna amortyzacja — enduro / trail / all-mountain / downhill). Kupujesz rowery w Niemczech i sprzedajesz je w Polsce z zyskiem.
 
 TWOJE DANE SPRZEDAŻOWE (rowery które już sprzedałeś w Polsce):
 ${salesHistory.split("\n").map(l => l.trim()).filter(Boolean).map(l => "- " + l).join("\n")}
 
-ZASADA: Opłaca się TYLKO jeśli możesz sprzedać rower w Polsce za minimum ${100 + Number(minProfit)}% ceny zakupu z ogłoszenia (czyli zysk min. ${minProfit}%). Nie uwzględniaj kosztów transportu.
+KROK 1 — ROZPOZNAJ TYP ROWERU na podstawie tytułu i opisu:
+- "full" — rower z pełną amortyzacją (przód + tył), np. enduro, trail, all-mountain, downhill.
+- "dirt" — rower dirt jump / slopestyle / pumptrack, sztywna rama, brak tylnego zawieszenia.
+- "inny" — wszystko inne: hardtail XC bez tylnego zawieszenia ale NIE dirtowy, szosówka, gravel, miejski, dziecięcy, elektryczny, BMX, części/akcesoria, albo gdy nie da się jednoznacznie rozpoznać typu.
+
+KROK 2 — ZASADA OPŁACALNOŚCI:
+- Jeśli "typ_roweru" to "inny" → ZAWSZE "oplaca_sie": false, niezależnie od ceny czy zysku.
+- Jeśli typ to "full" lub "dirt" → opłaca się TYLKO jeśli możesz sprzedać rower w Polsce za minimum ${100 + Number(minProfit)}% ceny zakupu z ogłoszenia (czyli zysk min. ${minProfit}%). Nie uwzględniaj kosztów transportu.
 
 OCEŃ TO OGŁOSZENIE:
 Tytuł: ${listing.title}
 Cena z ogłoszenia: ${listing.price != null ? listing.price + "€" : "brak"}
 Lokalizacja: ${listing.location}
 Opis: ${listing.desc}
-Model: ${listing.bike}${chatInfo}
+Model/kategoria wyszukiwania: ${listing.bike}${chatInfo}
 
 Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
 {
+  "typ_roweru": "full" lub "dirt" lub "inny",
   "oplaca_sie": true lub false,
   "przewidywany_zysk": liczba w EUR (cena sprzedaży w PL minus cena zakupu),
-  "krotki_opis": "max 2 zdania — stan roweru i dlaczego opłaca się lub nie"
+  "krotki_opis": "max 2 zdania — stan roweru, typ i dlaczego opłaca się lub nie"
 }`;
 
     addLog(`🤖 Analizuję: ${listing.title}${listing.price != null ? ` za ${listing.price}€` : ""}`, "info");
@@ -317,7 +339,18 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
         let clean = raw.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
         const jsonMatch = clean.match(/\{[\s\S]*\}/);
         if (jsonMatch) clean = jsonMatch[0];
-        return JSON.parse(clean);
+        const parsed = JSON.parse(clean);
+
+        // Normalizuj typ roweru — jeśli Gemini nie poda nic sensownego, traktuj jako "inny"
+        const typ = ["full", "dirt"].includes(parsed.typ_roweru) ? parsed.typ_roweru : "inny";
+        parsed.typ_roweru = typ;
+
+        // TWARDA REGUŁA: "inny" zawsze = nie opłaca się, niezależnie co zwróci Gemini
+        if (typ === "inny") {
+          parsed.oplaca_sie = false;
+        }
+
+        return parsed;
 
       } catch (e) {
         addLog(`⚠️ Błąd parsowania Gemini: ${e.message}`, "error");
@@ -329,16 +362,18 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
 
   // ── Discord embed ──────────────────────────────────────────────────────
   const sendToDiscord = async (listing, analysis) => {
+    const typLabel = TYPE_LABELS[analysis.typ_roweru]?.label || analysis.typ_roweru || "–";
     const embed = {
       title: `🚲 OKAZJA: ${listing.title}`,
       url: listing.href,
       color: 0x22c55e,
       fields: [
+        { name: "🚴 Typ roweru",        value: `**${typLabel}**`, inline: true },
         { name: "💰 Cena z ogłoszenia", value: listing.price != null ? `**${listing.price}€**` : "brak", inline: true },
         { name: "✅ Opłaca się",        value: analysis.oplaca_sie ? "**TAK**" : "**NIE**", inline: true },
         { name: "🤑 Przewidywany zysk", value: `**~${analysis.przewidywany_zysk}€**`, inline: true },
         { name: "📍 Lokalizacja",       value: listing.location || "–", inline: true },
-        { name: "🚴 Model",             value: listing.bike, inline: true },
+        { name: "🔎 Wyszukiwanie",      value: listing.bike, inline: true },
         { name: "🔗 Link do ogłoszenia",value: listing.href },
         { name: "📝 Krótki opis",       value: analysis.krotki_opis },
       ],
@@ -423,7 +458,10 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
           }
         } else {
           // ❌ Gemini mówi NIE → nie wysyłaj
-          addLog(`⏭ Gemini: NIE opłaca się (${listing.title})`, "info");
+          const reason = analysis.typ_roweru === "inny"
+            ? `typ: inny — odrzucone automatycznie`
+            : `zysk za mały`;
+          addLog(`⏭ Gemini: NIE opłaca się (${reason}) — ${listing.title}`, "info");
         }
 
         setResults(prev => [{
@@ -606,13 +644,13 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
                   <div style={{ background: "#0a1f0f", border: "1px solid #22c55e33", borderRadius: 10, padding: 12 }}>
                     <div style={{ color: "#22c55e", fontWeight: 700, fontSize: 12, marginBottom: 4 }}>✅ Gemini mówi TAK</div>
                     <div style={{ fontSize: 11, color: "#475569", lineHeight: 1.5 }}>
-                      Webhook Discord wysłany z ceną, zyskiem i linkiem do ogłoszenia
+                      Typ roweru to <strong>full</strong> lub <strong>dirt</strong> i zysk ≥ minimum — webhook Discord wysłany z typem, ceną, zyskiem i linkiem
                     </div>
                   </div>
                   <div style={{ background: "#1a0f0f", border: "1px solid #ef444433", borderRadius: 10, padding: 12 }}>
                     <div style={{ color: "#f87171", fontWeight: 700, fontSize: 12, marginBottom: 4 }}>❌ Gemini mówi NIE</div>
                     <div style={{ fontSize: 11, color: "#475569", lineHeight: 1.5 }}>
-                      Ogłoszenie pominięte, webhook nie wysłany
+                      Ogłoszenie pominięte, webhook nie wysłany — gdy typ to <strong>"inny"</strong> (np. szosówka, hardtail XC, miejski), odrzucane jest <strong>zawsze</strong>, niezależnie od ceny
                     </div>
                   </div>
                 </div>
@@ -681,6 +719,12 @@ Odpowiedz TYLKO w JSON (bez markdown, bez komentarzy):
                 <div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
                     <Badge status={r.status} />
+                    {r.analysis?.typ_roweru && (
+                      <span style={{
+                        fontSize: 11, fontWeight: 700,
+                        color: TYPE_LABELS[r.analysis.typ_roweru]?.color || "#475569",
+                      }}>{TYPE_LABELS[r.analysis.typ_roweru]?.label || r.analysis.typ_roweru}</span>
+                    )}
                     <span style={{ color: "#f59e0b", fontSize: 11 }}>{r.listing.bike}</span>
                     <span style={{ color: "#1e3352", fontSize: 11 }}>• {r.timestamp}</span>
                   </div>
@@ -893,7 +937,7 @@ Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, most
                 {[
                   { ico: "🔄", t: "Pętla ciągła",  d: "Skanuje bez przerwy — po każdym pełnym cyklu czeka 60s i zaczyna od nowa" },
                   { ico: "🆕", t: "Tylko nowe",     d: "Każde ogłoszenie trafia do Gemini tylko raz — widziane ID są zapamiętane" },
-                  { ico: "🤖", t: "Gemini AI",      d: "Ocenia czy warto kupić i odsprzedać w Polsce. Zwraca: opłaca_sie, przewidywany_zysk, opis" },
+                  { ico: "🤖", t: "Gemini AI",      d: "Rozpoznaje typ (full/dirt/inny) i ocenia czy warto kupić i odsprzedać w Polsce. Typ \"inny\" jest zawsze odrzucany" },
                   { ico: "📨", t: "Discord",        d: "Webhook z ceną, zyskiem i linkiem wysyłany TYLKO gdy Gemini mówi TAK" },
                 ].map(s => (
                   <div key={s.t} style={{ background: "#070c17", borderRadius: 12, padding: 16 }}>
