@@ -55,7 +55,7 @@ const BIKE_MODELS = [
     id: "cat_mountainbike",
     label: "🏔️ MTB (cała kategoria)",
     isCategory: true,
-    categoryUrl: "https://www.kleinanzeigen.de/s-fahrraeder/preis:200:2000/c217+fahrraeder.type_s:mountainbike",
+    categoryUrl: "https://www.kleinanzeigen.de/s-fahrraeder/c217+fahrraeder.type_s:mountainbike",
   },
   {
     id: "cat_dirt_bmx",
@@ -130,7 +130,13 @@ function App() {
   const [geminiModel,    setGeminiModel]    = useState(cfg.geminiModel || "llama-3.3-70b-versatile");
   const [geminiChatName, setGeminiChatName] = useState(cfg.geminiChatName || "");
   const [minProfit,      setMinProfit]      = useState(cfg.minProfit || 20);
-  const [salesHistory,   setSalesHistory]   = useState(cfg.salesHistory || "");
+  const [salesHistory,   setSalesHistory]   = useState(cfg.salesHistory || `Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)
+Canyon Stitched 360 Pro 2024 → 4000 zł (~930€)
+Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)
+Rose The Bruce 2 → 3800 zł (~880€)
+Trek Ticket DJ (amortyzator Pike DJ/Bomber DJ) → 6000 zł (~1400€)
+Canyon Torque AL 5 edycja 2018 → 5000 zł (~1160€)
+Canyon Spectral AL 6 → 6500 zł (~1510€)`);
   const [discordWebhook, setDiscordWebhook] = useState(cfg.discordWebhook || "");
   const [discordThread,  setDiscordThread]  = useState(cfg.discordThread || "");
   const [selectedBikes,  setSelectedBikes]  = useState(() => {
@@ -151,14 +157,6 @@ function App() {
   const [stats,    setStats]    = useState({ scanned: 0, deals: 0, sent: 0 });
   const [cycleNum, setCycleNum] = useState(0);
 
-  // Czat z Gemini — nauka oceniania rowerów
-  const [trainMessages, setTrainMessages] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("ddf_train_msgs") || "[]"); } catch { return []; }
-  });
-  const [trainInput,    setTrainInput]    = useState("");
-  const [trainLoading,  setTrainLoading]  = useState(false);
-  const trainEndRef = useRef(null);
-
   const runningRef   = useRef(false);
   const firstCycleRef = useRef(true); // cykl #1 = tylko zbieramy ID, nie analizujemy
   const logsEndRef  = useRef(null);
@@ -177,71 +175,11 @@ function App() {
   };
 
   useEffect(() => { logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs]);
-  useEffect(() => { trainEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [trainMessages, trainLoading]);
 
   const saveSettings = () => {
     const data = { geminiKey, geminiModel, geminiChatName, discordWebhook, discordThread, selectedBikes, provider, minProfit, salesHistory };
     localStorage.setItem("ddf_cfg", JSON.stringify(data));
-    localStorage.setItem("ddf_train_msgs", JSON.stringify(trainMessages));
     addLog("💾 Ustawienia zapisane", "success");
-  };
-
-  // Buduje kontekst wiedzy z historii czatu treningowego
-  const buildTrainingContext = () => {
-    if (trainMessages.length === 0) return "";
-    const lines = trainMessages.map(m =>
-      `[${m.role === "user" ? "Ty" : "Gemini"}]: ${m.text}`
-    ).join("\n");
-    return `\n\n=== TWOJA WIEDZA ZDOBYTA PODCZAS NAUKI (zapisana z czatu treningowego) ===\n${lines}\n=== KONIEC WIEDZY ===`;
-  };
-
-  // Wysyła wiadomość treningową do AI
-  const sendTrainMessage = async () => {
-    if (!trainInput.trim() || trainLoading) return;
-    if (!geminiKey) { alert("Najpierw ustaw klucz API w zakładce Ustawienia!"); return; }
-    const userMsg = { role: "user", text: trainInput.trim(), ts: new Date().toLocaleTimeString("pl-PL") };
-    const newMsgs = [...trainMessages, userMsg];
-    setTrainMessages(newMsgs);
-    setTrainInput("");
-    setTrainLoading(true);
-    try {
-      // Buduj historię konwersacji dla AI
-      const systemPrompt = `Jesteś ekspertem od rowerów MTB dirt i full-suspension. Pomagasz użytkownikowi skonfigurować system automatycznego wykrywania okazji rowerowych z Kleinanzeigen. Użytkownik będzie Cię uczyć: jakie rowery kupować, jakie ceny są opłacalne, jakich modeli szukać, jak oceniać stan. Zapamiętuj wszystko co mówi. Zadawaj pytania jeśli czegoś nie wiesz. Potwierdzaj że zrozumiałeś i podsumowuj co zapamiętałeś. Odpowiadaj po polsku, konkretnie i krótko.`;
-      const history = newMsgs.map(m => ({ role: m.role === "user" ? "user" : "assistant", content: m.text }));
-      let aiText = "";
-      if (provider === "groq") {
-        const resp = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${geminiKey}` },
-          body: JSON.stringify({
-            model: geminiModel,
-            messages: [{ role: "system", content: systemPrompt }, ...history],
-            temperature: 0.5, max_tokens: 1024,
-          }),
-        });
-        const data = await resp.json();
-        aiText = data?.choices?.[0]?.message?.content || "Brak odpowiedzi";
-      } else {
-        // Gemini — sklejamy historię w jeden prompt
-        const fullPrompt = systemPrompt + "\n\n" + history.map(m => `${m.role === "user" ? "Użytkownik" : "Gemini"}: ${m.content}`).join("\n");
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`;
-        const resp = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ contents: [{ parts: [{ text: fullPrompt }] }], generationConfig: { temperature: 0.5, maxOutputTokens: 1024 } }),
-        });
-        const data = await resp.json();
-        aiText = data?.candidates?.[0]?.content?.parts?.[0]?.text || "Brak odpowiedzi";
-      }
-      const aiMsg = { role: "ai", text: aiText, ts: new Date().toLocaleTimeString("pl-PL") };
-      const finalMsgs = [...newMsgs, aiMsg];
-      setTrainMessages(finalMsgs);
-      localStorage.setItem("ddf_train_msgs", JSON.stringify(finalMsgs));
-    } catch (e) {
-      const errMsg = { role: "ai", text: `❌ Błąd: ${e.message}`, ts: new Date().toLocaleTimeString("pl-PL") };
-      setTrainMessages(prev => [...prev, errMsg]);
-    }
-    setTrainLoading(false);
   };
 
   const addLog = useCallback((msg, type = "info") => {
@@ -377,9 +315,10 @@ function App() {
       ? `\nKontekst: ${geminiChatName}.`
       : "";
 
-    const trainingCtx = buildTrainingContext();
+    const prompt = `Jesteś ekspertem od rowerów dirtowych i MTB full-suspension. Kupujesz rowery w Niemczech i resellujesz je w Polsce z zyskiem. Masz wieloletnie doświadczenie — znasz dokładne ceny rynkowe w Polsce i wiesz które modele sprzedają się szybko.
 
-    const prompt = `Jesteś ekspertem od rowerów dirtowych i MTB full-suspension. Kupujesz rowery w Niemczech i resellujesz je w Polsce z zyskiem. Masz wieloletnie doświadczenie — znasz dokładne ceny rynkowe w Polsce i wiesz które modele sprzedają się szybko.${trainingCtx}
+=== TWOJA HISTORIA SPRZEDAŻY W POLSCE (REALNE CENY) ===
+${salesHistory.split("\n").map(l => l.trim()).filter(Boolean).map(l => "• " + l).join("\n")}
 
 === CENNIK REFERENCYJNY — CO WIESZ O TYCH MODELACH ===
 • Canyon Stitched 360 Pro (2021-2024): cena zakupu max 500-600€ żeby zarobić. Wersja z upgradami (Bomber DJ, koła NOA, mostek Title) — warta do 700€ zakupu.
@@ -673,7 +612,7 @@ Odpowiedz WYŁĄCZNIE w JSON (zero markdown, zero komentarzy, zero tekstu poza J
         </div>
 
         <div style={{ display: "flex", gap: 4 }}>
-          {[["scanner","🔍 Skaner"], ["results","📋 Wyniki"], ["train","🧠 Nauka AI"], ["settings","⚙️ Ustawienia"]].map(([id, label]) => (
+          {[["scanner","🔍 Skaner"], ["results","📋 Wyniki"], ["settings","⚙️ Ustawienia"]].map(([id, label]) => (
             <button key={id} onClick={() => setTab(id)} style={{
               padding: "8px 16px", borderRadius: 8, border: "none", fontWeight: 600, fontSize: 13,
               background: tab === id ? "#f59e0b" : "#1e293b",
@@ -881,110 +820,6 @@ Odpowiedz WYŁĄCZNIE w JSON (zero markdown, zero komentarzy, zero tekstu poza J
           </div>
         )}
 
-        {/* ═══ TRAIN ═══ */}
-        {tab === "train" && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 800, margin: "0 auto", width: "100%" }}>
-            <div style={{ background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 16, padding: 20 }}>
-              <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 10 }}>
-                🧠 Naucz AI jak oceniać rowery
-              </div>
-              <div style={{ fontSize: 12, color: "#475569", lineHeight: 1.7 }}>
-                Rozmawiaj z AI i przekaż mu swoją wiedzę — jakie modele kupujesz, za ile, ile dostałeś w Polsce, czego unikać.
-                AI zapamiętuje cały czat i używa tej wiedzy do analizy ogłoszeń podczas skanowania.
-              </div>
-              {trainMessages.length > 0 && (
-                <div style={{ marginTop: 8, fontSize: 11, color: "#22c55e" }}>
-                  ✅ AI ma {trainMessages.length} wiadomości wiedzy — aktywnie używa ich podczas analizy
-                </div>
-              )}
-            </div>
-
-            {/* Chat window */}
-            <div style={{
-              background: "#070c17", border: "1px solid #1a2d4a", borderRadius: 16,
-              minHeight: 400, maxHeight: 520, overflowY: "auto", padding: 16,
-              display: "flex", flexDirection: "column", gap: 12,
-            }}>
-              {trainMessages.length === 0 ? (
-                <div style={{ color: "#1e3352", textAlign: "center", padding: "60px 20px", fontSize: 13 }}>
-                  <div style={{ fontSize: 40, marginBottom: 12 }}>🧠</div>
-                  Zacznij rozmowę — powiedz AI co wie o rowerach, które kupujesz.<br/>
-                  <span style={{ fontSize: 11, color: "#1e293b" }}>np. "Canyon Stitched 360 Pro kupiłem za 480€ i sprzedałem za 3900 zł w Polsce"</span>
-                </div>
-              ) : trainMessages.map((m, i) => (
-                <div key={i} style={{
-                  display: "flex", flexDirection: m.role === "user" ? "row-reverse" : "row",
-                  gap: 10, alignItems: "flex-start",
-                }}>
-                  <div style={{
-                    width: 32, height: 32, borderRadius: "50%", flexShrink: 0,
-                    background: m.role === "user" ? "#f59e0b22" : "#3b82f622",
-                    display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16,
-                  }}>
-                    {m.role === "user" ? "👤" : "🤖"}
-                  </div>
-                  <div style={{
-                    maxWidth: "78%",
-                    background: m.role === "user" ? "#1a2a0d" : "#0d1a2e",
-                    border: `1px solid ${m.role === "user" ? "#f59e0b22" : "#3b82f622"}`,
-                    borderRadius: 12, padding: "10px 14px",
-                  }}>
-                    <div style={{ fontSize: 13, color: "#e2e8f0", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{m.text}</div>
-                    <div style={{ fontSize: 10, color: "#334155", marginTop: 4 }}>{m.ts}</div>
-                  </div>
-                </div>
-              ))}
-              {trainLoading && (
-                <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
-                  <div style={{ width: 32, height: 32, borderRadius: "50%", background: "#3b82f622", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>🤖</div>
-                  <div style={{ background: "#0d1a2e", border: "1px solid #3b82f622", borderRadius: 12, padding: "12px 16px" }}>
-                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                      {[0,1,2].map(d => (
-                        <div key={d} style={{ width: 7, height: 7, borderRadius: "50%", background: "#3b82f6", animation: "pulse 1s infinite", animationDelay: `${d*0.2}s` }} />
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-              <div ref={trainEndRef} />
-            </div>
-
-            {/* Input */}
-            <div style={{ display: "flex", gap: 10 }}>
-              <textarea
-                rows={2}
-                value={trainInput}
-                onChange={e => setTrainInput(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendTrainMessage(); } }}
-                placeholder="np. Canyon Spectral AL 6 kupiłem za 800€, sprzedałem za 6500 zł. Warto kupować do 900€..."
-                style={{ flex: 1, resize: "none", fontFamily: "inherit", fontSize: 13 }}
-              />
-              <button onClick={sendTrainMessage} disabled={trainLoading || !trainInput.trim()} style={{
-                padding: "0 20px", borderRadius: 10, border: "none", fontWeight: 800, fontSize: 18,
-                background: trainLoading || !trainInput.trim() ? "#1e293b" : "linear-gradient(135deg, #f59e0b, #ef4444)",
-                color: trainLoading || !trainInput.trim() ? "#334155" : "#080d18",
-                cursor: trainLoading || !trainInput.trim() ? "default" : "pointer",
-              }}>➤</button>
-            </div>
-
-            {/* Actions */}
-            <div style={{ display: "flex", gap: 10 }}>
-              <button onClick={() => {
-                if (trainMessages.length === 0) return;
-                if (!confirm("Wyczyścić całą historię nauki? AI straci tę wiedzę.")) return;
-                setTrainMessages([]);
-                localStorage.removeItem("ddf_train_msgs");
-              }} style={{
-                padding: "8px 16px", borderRadius: 8, border: "1px solid #ef444433",
-                background: "#ef444411", color: "#f87171", fontSize: 12, fontWeight: 600,
-              }}>🗑 Wyczyść historię nauki</button>
-              <div style={{ flex: 1, background: "#0d1526", border: "1px solid #1a2d4a", borderRadius: 8, padding: "8px 14px", fontSize: 11, color: "#334155" }}>
-                💡 Możesz pisać: ceny sprzedaży w Polsce, które modele są opłacalne, na co zwracać uwagę w opisie, jakich unikać
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* ═══ SETTINGS ═══ */}
         {tab === "settings" && (
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
@@ -1118,29 +953,28 @@ Odpowiedz WYŁĄCZNIE w JSON (zero markdown, zero komentarzy, zero tekstu poza J
               <div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                   <label style={{ fontSize: 11, color: "#475569", textTransform: "uppercase", letterSpacing: 0.8 }}>
-                    Wiedza AI (z zakładki Nauka AI)
+                    Historia sprzedaży (jeden rower na linię)
                   </label>
+                  <button onClick={() => setSalesHistory(`Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)
+Canyon Stitched 360 Pro 2024 → 4000 zł (~930€)
+Canyon Stitched 360 Pro 2023 (koła NOA Dirty First, amortyzator Bomber DJ, mostek Title) → 5000 zł (~1160€)
+Rose The Bruce 2 → 3800 zł (~880€)
+Trek Ticket DJ (amortyzator Pike DJ/Bomber DJ) → 6000 zł (~1400€)
+Canyon Torque AL 5 edycja 2018 → 5000 zł (~1160€)
+Canyon Spectral AL 6 → 6500 zł (~1510€)`)} style={{
+                    padding: "4px 10px", borderRadius: 6, border: "1px solid #1e293b",
+                    background: "transparent", color: "#475569", fontSize: 11,
+                  }}>↩ Przywróć domyślne</button>
                 </div>
-                <div style={{
-                  background: "#070c17", border: "1px solid #1a3a5f", borderRadius: 10, padding: 16,
-                  display: "flex", flexDirection: "column", gap: 10,
-                }}>
-                  <div style={{ fontSize: 12, color: "#475569", lineHeight: 1.7 }}>
-                    AI uczy się z Twojego czatu w zakładce <strong style={{ color: "#f59e0b" }}>🧠 Nauka AI</strong>.
-                    Cała historia rozmowy jest automatycznie dołączana do każdej analizy ogłoszenia.
-                  </div>
-                  <div style={{ fontSize: 12, color: trainMessages.length > 0 ? "#22c55e" : "#475569" }}>
-                    {trainMessages.length > 0
-                      ? `✅ AI ma ${trainMessages.length} wiadomości wiedzy zapisanych`
-                      : "⚠️ Brak wiedzy — otwórz zakładkę 🧠 Nauka AI i porozmawiaj z AI"}
-                  </div>
-                  <button onClick={() => setTab("train")} style={{
-                    padding: "9px 0", borderRadius: 8, border: "1px solid #f59e0b44",
-                    background: "#f59e0b11", color: "#f59e0b", fontSize: 12, fontWeight: 700,
-                  }}>🧠 Przejdź do Nauki AI →</button>
-                </div>
+                <textarea
+                  rows={7}
+                  value={salesHistory}
+                  onChange={e => setSalesHistory(e.target.value)}
+                  placeholder={"Canyon Stitched 360 Pro 2021 → 3900 zł (~900€)\nRose The Bruce 2 → 3800 zł (~880€)"}
+                  style={{ fontFamily: "monospace", fontSize: 12, lineHeight: 1.7, resize: "vertical" }}
+                />
                 <div style={{ fontSize: 11, color: "#334155", marginTop: 4 }}>
-                  AI wykorzystuje tę wiedzę zamiast stałej listy — możesz go nauczyć dokładnie tego czego chcesz
+                  Na podstawie tych danych Gemini szacuje ile możesz dostać za podobny rower w Polsce
                 </div>
               </div>
             </div>
